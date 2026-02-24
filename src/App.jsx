@@ -10,6 +10,13 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+// Convierte "2026-01-29" → "29/01/2026"
+const fmtDate = (iso) => {
+  if (!iso) return "";
+  const [y, m, d] = iso.split("-");
+  return `${d}/${m}/${y}`;
+};
+
 // ──────────────────────────────────────────────────────────────
 //  DATA LAYER — todas las operaciones con Supabase
 // ──────────────────────────────────────────────────────────────
@@ -115,6 +122,19 @@ async function updateReservation(resId, fields) {
 }
 
 /** Elimina una reserva (cascade elimina pistas y jugadores) */
+async function deleteReservationsBefore(date) {
+  // date is ISO string "YYYY-MM-DD"
+  const { data, error: fetchErr } = await sb
+    .from("reservations")
+    .select("id")
+    .lt("date", date);
+  if (fetchErr) throw fetchErr;
+  for (const r of data) {
+    await sb.from("reservations").delete().eq("id", r.id);
+  }
+  return data.length;
+}
+
 async function deleteReservation(resId) {
   const { error } = await sb.from("reservations").delete().eq("id", resId);
   if (error) throw error;
@@ -413,6 +433,11 @@ export default function App() {
               onOpen={(id) => { setActiveId(id); setTab("manage"); }}
               onDelete={(id) => withSave(() => deleteReservation(id), "Reserva cancelada")}
               onEdit={(res) => setModal({type:"res", res})}
+              onPurgeBefore={async (date, count) => {
+                if (window.confirm(`¿Eliminar ${count} reserva${count>1?"s":""} anteriores al ${fmtDate(date)}?`)) {
+                  withSave(() => deleteReservationsBefore(date), `${count} reserva${count>1?"s":""} eliminada${count>1?"s":""} ✓`);
+                }
+              }}
             />
           )}
           {tab === "manage" && liveRes && (
@@ -487,7 +512,8 @@ export default function App() {
 // ──────────────────────────────────────────────────────────────
 //  HOME TAB
 // ──────────────────────────────────────────────────────────────
-function HomeTab({ upcoming, past, loading, onOpen, onDelete, onEdit }) {
+function HomeTab({ upcoming, past, loading, onOpen, onDelete, onEdit, onPurgeBefore }) {
+  const [purgeDate, setPurgeDate] = useState("");
   if (loading) return (
     <div className="loading-full">
       <div className="spinner"/> Conectando con Supabase…
@@ -495,6 +521,9 @@ function HomeTab({ upcoming, past, loading, onOpen, onDelete, onEdit }) {
   );
   if (!upcoming.length && !past.length)
     return <p className="empty">No hay reservas.<br/>Pulsa <strong style={{color:"var(--accent)"}}>+</strong> para crear una.</p>;
+
+  const purgeCount = purgeDate ? past.filter(r => r.date < purgeDate).length : 0;
+
   return (
     <>
       {upcoming.length > 0 && <>
@@ -504,6 +533,18 @@ function HomeTab({ upcoming, past, loading, onOpen, onDelete, onEdit }) {
       {past.length > 0 && <>
         <div className="sh" style={{marginTop:8}}><span className="sh-title">Historial</span></div>
         {past.map(r=><ResCard key={r.id} res={r} onOpen={onOpen} onDelete={onDelete} onEdit={onEdit}/>)}
+        <div style={{background:"var(--s2)",border:"1px solid var(--border)",borderRadius:12,padding:14,marginTop:8}}>
+          <div style={{fontSize:13,color:"var(--sub)",marginBottom:10,fontWeight:600}}>🗑 Limpiar historial anterior a:</div>
+          <div className="row" style={{gap:8}}>
+            <input type="date" value={purgeDate} onChange={e=>setPurgeDate(e.target.value)}
+              style={{flex:1,background:"var(--s1)",border:"1px solid var(--border)",borderRadius:8,padding:"10px 12px",color:"var(--text)",fontSize:16,outline:"none"}}/>
+            <button className="btn btn-d btn-sm" disabled={!purgeDate||purgeCount===0}
+              onClick={()=>onPurgeBefore(purgeDate, purgeCount)}>
+              {purgeCount>0?`Borrar (${purgeCount})`:"Borrar"}
+            </button>
+          </div>
+          {purgeDate && purgeCount===0 && <p style={{fontSize:12,color:"var(--sub)",marginTop:8}}>No hay reservas anteriores a esa fecha.</p>}
+        </div>
       </>}
     </>
   );
@@ -518,7 +559,7 @@ function ResCard({ res, onOpen, onDelete, onEdit }) {
       <div className="row">
         <div className="spacer">
           <div className="card-title">{res.venue}</div>
-          <div className="card-sub">📅 {res.date} · 🕐 {res.timeStart}–{res.timeEnd}<br/>🎾 {res.courts.length} pista{res.courts.length>1?"s":""} · {cap} plazas</div>
+          <div className="card-sub">📅 {fmtDate(res.date)} · 🕐 {res.timeStart}–{res.timeEnd}<br/>🎾 {res.courts.length} pista{res.courts.length>1?"s":""} · {cap} plazas</div>
         </div>
         <span className={`badge ${full?"b-red":"b-green"}`}>{total}/{cap}</span>
       </div>
@@ -584,7 +625,7 @@ function ManageTab({ res, withSave, showToast, setModal }) {
         <div className="row">
           <div className="spacer">
             <div className="card-title">{res.venue}</div>
-            <div className="card-sub">{res.date} · {res.timeStart}–{res.timeEnd} · {res.courts.length} pista{res.courts.length>1?"s":""}</div>
+            <div className="card-sub">{fmtDate(res.date)} · {res.timeStart}–{res.timeEnd} · {res.courts.length} pista{res.courts.length>1?"s":""}</div>
           </div>
           <span className={`badge ${isFull?"b-red":"b-green"}`}>{total}/{cap}</span>
         </div>
@@ -737,7 +778,7 @@ function WAModal({ res, onClose, showToast }) {
   const total=allPlayers.length;
 
   const getText = () => {
-    const hdr=`🎾 *${res.venue}*\n📅 ${res.date}  |  🕐 ${res.timeStart} - ${res.timeEnd}\n`;
+    const hdr=`🎾 *${res.venue}*\n📅 ${fmtDate(res.date)}  |  🕐 ${res.timeStart} - ${res.timeEnd}\n`;
     if (mode==="status") {
       const list=allPlayers.map((p,i)=>`${i+1}. ${p}`).join("\n");
       const libres=cap-total;
